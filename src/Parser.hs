@@ -3,24 +3,51 @@
 module Parser where
 
 import Control.Applicative (Alternative, empty, many, some, (<|>))
-import Control.Monad.Except (catchError, throwError)
+import Control.Monad.Except
 import Control.Monad.State
 import Data.Bifunctor (first)
 import Data.Functor (($>))
 import Data.List (foldl')
 
 data Pos = Pos {row :: !Int, col :: !Int}
+type Error = String
 
--- TODO: Have either be outer most as we lose the position otherwise.
-newtype Parser a = Parser {runParser :: String -> StateT Pos (Either String) (a, String)}
+instance Show Pos where
+    show (Pos row col) = "line: " <> show row <> ", column: " <> show col
+
+startPos :: Pos
+startPos = Pos 1 1
+
+posToIdx :: Pos -> Int
+posToIdx (Pos a b) = a + b - 2
+
+newtype Parser a = Parser {runParser :: String -> ExceptT Error (State Pos) (a, String)}
+
+-- TODO: Make safer
+getChr :: Pos -> String -> Char
+getChr (Pos row col) s =
+    let xs = lines s
+     in xs !! (row - 1) !! (col - 1)
 
 parseEither :: Parser a -> String -> Either String a
-parseEither p s = fst <$> evalStateT (runParser p s) (Pos 0 0)
+parseEither p s =
+    let (a, pos) = runState (runExceptT (runParser p s)) startPos
+     in case a of
+            Left s' ->
+                Left
+                    ( "Expected '"
+                        <> s'
+                        <> "', but got '"
+                        <> [getChr pos s]
+                        <> "', at "
+                        <> show pos
+                    )
+            Right (x, _) -> Right x
 
 parseMaybe :: Parser a -> String -> Maybe a
-parseMaybe p s = case fst <$> evalStateT (runParser p s) (Pos 0 0) of
+parseMaybe p s = case evalState (runExceptT (runParser p s)) startPos of
     Left _ -> Nothing
-    Right x -> Just x
+    Right (a, _) -> Just a
 
 instance Functor Parser where
     fmap :: (a -> b) -> Parser a -> Parser b
@@ -57,61 +84,70 @@ instance Alternative Parser where
     many p = some p <|> pure []
     some p = (:) <$> p <*> many p
 
-addCol :: (Monad m) => Int -> StateT Pos m ()
+modifyError :: (Error -> Error) -> Parser a -> Parser a
+modifyError f (Parser p) = Parser (withExceptT f . p)
+
+resetCol :: ExceptT error (State Pos) ()
+resetCol = do
+    Pos row _ <- get
+    put (Pos row 1)
+
+addCol :: Int -> ExceptT error (State Pos) ()
 addCol n = do
-    (Pos row col) <- get
+    Pos row col <- get
     put (Pos row (col + n))
 
-addRow :: (Monad m) => Int -> StateT Pos m ()
+addRow :: Int -> ExceptT error (State Pos) ()
 addRow n = do
-    (Pos row col) <- get
+    Pos row col <- get
     put (Pos (row + n) col)
 
 char :: Char -> Parser Char
 char '\n' =
     Parser
         ( \case
-            [] -> throwError "Expected '\\n', but got <empty input>"
+            [] -> throwError "\\n"
             (x : xs)
-                | x == '\n' -> addRow 1 >> return (x, xs)
-                | otherwise -> throwError ("Expected '\\n',  but got '" <> [x] <> "'")
+                | x == '\n' -> resetCol >> addRow 1 >> return (x, xs)
+                | otherwise -> throwError "\\n"
         )
 char c = Parser $ \case
-    [] -> throwError ("Expected '" <> [c] <> "', but got <empty input>")
+    [] -> throwError [c]
     (x : xs)
         | x == c -> addCol 1 >> return (x, xs)
-        | otherwise -> throwError ("Expected '" <> [c] <> "', but got '" <> [x] <> "'")
+        | otherwise -> throwError [c]
 
 string :: String -> Parser String
 string = mapM char
 
+eol :: Parser ()
+eol = void (char '\n')
+
 digit :: Parser Int
 digit =
-    foldl'
-        (<|>)
-        empty
-        [ char '0' $> 0
-        , char '1' $> 1
-        , char '2' $> 2
-        , char '3' $> 3
-        , char '4' $> 4
-        , char '5' $> 5
-        , char '6' $> 6
-        , char '7' $> 7
-        , char '8' $> 8
-        , char '9' $> 9
-        ]
+    modifyError (const "<digit>") $
+        foldl'
+            (<|>)
+            empty
+            [ char '0' $> 0
+            , char '1' $> 1
+            , char '2' $> 2
+            , char '3' $> 3
+            , char '4' $> 4
+            , char '5' $> 5
+            , char '6' $> 6
+            , char '7' $> 7
+            , char '8' $> 8
+            , char '9' $> 9
+            ]
 
-d :: Parser Int
-d = decimal <$> some digit
+decimal :: Parser Int
+decimal = go <$> some digit
+  where
+    go :: (Num a) => [a] -> a
+    go = foldl' (\acc x -> acc * 10 + x) 0
 
-decimal :: (Num a) => [a] -> a
-decimal = foldl' (\acc x -> acc * 10 + x) 0
-
-u :: Parser Int
-u = do
-    sign <- char '-' <|> char '+'
-    let f = case sign of
-            '-' -> (* (-1))
-            _ -> id
-    f <$> d
+signed :: Parser Int
+signed = do
+    sign <- char '-' $> negate <|> char '+' $> id
+    sign <$> decimal
