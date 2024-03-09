@@ -120,15 +120,42 @@ char c = Parser $ \case
 string :: String -> Parser String
 string = mapM char
 
+lparen :: Parser Char
+lparen = char '('
+
+rparen :: Parser Char
+rparen = char ')'
+
 eol :: Parser ()
 eol = void (char '\n')
+
+look :: Parser String
+look = Parser $ \s -> return (s, s)
+
+consume :: Parser Char
+consume = Parser $ \case
+    [] -> throwError "<something>"
+    (x : xs) -> return (x, xs)
+
+eof :: Parser ()
+eof = do
+    s <- look
+    unless (null s) (fail "<eof>")
+
+satisfy :: (Char -> Bool) -> Parser Char
+satisfy f = do
+    s <- consume
+    if f s
+        then return s
+        else fail "<failed predicate>"
+
+choice :: [Parser a] -> Parser a
+choice = foldl' (<|>) empty
 
 digit :: Parser Int
 digit =
     modifyError (const "<digit>") $
-        foldl'
-            (<|>)
-            empty
+        choice
             [ char '0' $> 0
             , char '1' $> 1
             , char '2' $> 2
@@ -140,6 +167,18 @@ digit =
             , char '8' $> 8
             , char '9' $> 9
             ]
+chainl1 :: Parser b -> Parser (b -> b -> b) -> Parser b
+chainl1 p op = do
+    x <- p
+    rest x
+  where
+    rest x =
+        ( do
+            f <- op
+            y <- p
+            rest (f x y)
+        )
+            <|> return x
 
 decimal :: Parser Int
 decimal = go <$> some digit
