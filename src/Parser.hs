@@ -142,6 +142,9 @@ eof = do
     s <- look
     unless (null s) (fail "<eof>")
 
+pSuccess :: Parser ()
+pSuccess = return ()
+
 satisfy :: (Char -> Bool) -> Parser Char
 satisfy f = do
     s <- consume
@@ -151,6 +154,9 @@ satisfy f = do
 
 choice :: [Parser a] -> Parser a
 choice = foldl' (<|>) empty
+
+try :: Parser a -> Parser a
+try _ = error "TODO: Implement try"
 
 digit :: Parser Int
 digit =
