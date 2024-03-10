@@ -5,7 +5,9 @@
 
 module QuasiParser where
 
+import Control.Applicative ((<**>))
 import Control.Monad (void, (<=<))
+import Control.Monad.Identity (Identity)
 import Data.Char (digitToInt, isSpace)
 import Data.Data (Data, Typeable)
 import Data.Functor (($>))
@@ -16,7 +18,7 @@ import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Quote
 import Language.Haskell.TH.Syntax (tupleDataName)
 import Text.Parsec hiding (Empty)
-import Control.Applicative ((<**>))
+import Text.Parsec.Expr (Assoc (..), Operator (..), OperatorTable (..), buildExpressionParser)
 
 data Format
     = Empty
@@ -127,42 +129,11 @@ format =
 
 -- Parsing regex
 
-postfix :: (a -> b) -> Parser a -> Parser (b -> b) -> Parser b
-postfix wrap p op = (wrap <$> p) <**> rest
-    where rest = flip (.) <$> op <*> rest <|> return id
-
 type Parser = Parsec String ()
+type Table a = OperatorTable String () Identity a
 
 parseEither :: Parser a -> String -> Either ParseError a
 parseEither p = parse (p <* eof) ""
-
-factor4 :: Parser Format
-factor4 =
-    choice
-        [ try $ string "%d" $> Decimal
-        , try $ string "%c" $> Char
-        , try $ string "%n" $> Newline
-        , try $ string "%s" $> String
-        , -- TODO: Make literal be anything but key characters
-          try $ Literal <$> (many1 alphaNum <|> string "\\n" <|> many1 (char ' '))
-        , Group <$> between (char '(') (char ')') factor1
-        ]
-
-factor3 :: Parser Format
-factor3 =
-    choice
-        [ try $ postfix id factor4 (Many <$ char '*')
-        , try $ postfix id factor4 (Some <$ char '+')
-        , try $ factor4 `chainl1` (char '&' $> SepBy)
-        , factor4
-        ]
-
-factor2 :: Parser Format
-factor2 =
-    choice
-        [ try $ factor4 `chainr1` (return () $> Follows)
-        , factor3
-        ]
 
 factor1 :: Parser Format
 factor1 =
@@ -170,3 +141,53 @@ factor1 =
         [ try $ factor2 `chainl1` (char '|' $> Option)
         , factor2
         ]
+factor2 :: Parser Format
+factor2 = choice [try $ factor3 `chainl1` (return () $> Follows), factor3]
+
+factor3 :: Parser Format
+factor3 =
+    choice
+        [ try $ buildExpressionParser table atom
+        , atom
+        ]
+
+atom :: Parser Format
+atom =
+    choice
+        [ try $ Group <$> between (char '(') (char ')') factor1
+        , try $ string "%s" $> String
+        , try $ string "%d" $> Decimal
+        , try $ string "%c" $> Char
+        , try $ string "%n" $> Newline
+        , Literal <$> (many1 alphaNum <|> many1 (char ' '))
+        ]
+
+table :: Table Format
+table = [[postfix "*" Many, postfix "+" Some, binary "&" SepBy AssocLeft]]
+
+postfix :: String -> (a -> a) -> Operator String () Identity a
+postfix name fun = Postfix $ string name $> fun
+
+binary :: (Stream s m Char) => String -> (a -> a -> a) -> Assoc -> Operator s u m a
+binary name fun = Infix (string name $> fun)
+
+{-
+-- Pre
+factor1 ::= factor1 '|' factor2
+          | factor2
+
+factor2 ::= <empty>
+          | factor2 factor3
+
+factor3 ::= factor3 '*'
+          | factor3 '+'
+          | factor3 '&' factor3
+          | atom
+
+atom ::= '%s'
+       | '%c'
+       | '%n'
+       | '%d'
+       | <literal>
+       | '(' factor1 ')'
+-}
