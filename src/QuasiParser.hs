@@ -1,3 +1,4 @@
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -5,24 +6,29 @@
 
 module QuasiParser where
 
-import Control.Applicative ((<**>))
 import Control.Monad (void, (<=<))
 import Control.Monad.Identity (Identity)
 import Data.Char (digitToInt, isSpace)
 import Data.Data (Data, Typeable)
 import Data.Functor (($>))
 import Data.List (foldl')
-import Debug.Trace (trace)
 import Language.Haskell.TH (conE)
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Quote
 import Language.Haskell.TH.Syntax (tupleDataName)
 import Text.Parsec hiding (Empty)
-import Text.Parsec.Expr (Assoc (..), Operator (..), OperatorTable (..), buildExpressionParser)
+import Text.Parsec.Expr (
+    Assoc (..),
+    Operator (..),
+    OperatorTable,
+    buildExpressionParser,
+ )
+import Debug.Trace (traceShow)
 
 data Format
     = Empty
-    | Decimal
+    | Signed
+    | Unsigned
     | Char
     | Newline
     | String
@@ -36,14 +42,15 @@ data Format
     deriving (Show, Typeable, Data)
 
 makeParser :: Format -> TH.ExpQ
-makeParser fmt2 = trace (show fmt2) [|parseEither ($(toExpr fmt2) <* eof)|]
+makeParser fmt2 = traceShow fmt2 [|parseEither ($(toExpr fmt2) <* eof)|]
 
 toExpr :: Format -> TH.ExpQ
 toExpr = \case
     Empty -> [|return ()|]
     Newline -> [|void newline|]
     String -> [|many1 (satisfy (not . isSpace))|]
-    Decimal -> [|decimal|]
+    Unsigned -> [|unsigned|]
+    Signed -> [|signed|]
     Char -> [|many1 alphaNum|]
     Literal str -> [|void (string str)|]
     Group fmt -> [|$(toExpr fmt)|]
@@ -70,9 +77,9 @@ toExpr = \case
                 | n == 0 -> foldl' ap0 e es
                 | n == 1 -> foldl' ap1 e es
                 | ii -> foldl' apN [|$tup <$> $e|] es
-                | otherwise -> foldl' apN [|$tup $> $e|] es
+                | otherwise -> foldl' apN [|$tup <$ $e|] es
       where
-        ap0 l (_, r) = [|$l <$ $r|]
+        ap0 l (_, r) = [|$l $> $r|]
         ap1 l (i, r) = if i then [|$l *> $r|] else [|$l <* $r|]
         apN l (i, r) = if i then [|$l <*> $r|] else [|$l <* $r|]
 
@@ -81,7 +88,8 @@ interesting = \case
     Empty -> False
     Literal{} -> False
     Newline -> False
-    Decimal -> True
+    Signed -> True
+    Unsigned -> True
     Char -> True
     String -> True
     Group fmt -> interesting fmt
@@ -91,8 +99,16 @@ interesting = \case
     Option l r -> interesting l || interesting r
     Follows l r -> interesting l || interesting r
 
-decimal :: Parser Int
-decimal = foldl' (\acc -> ((10 * acc) +)) 0 <$> many1 (digitToInt <$> digit)
+decimal :: [Int] -> Int
+decimal = foldl' (\acc -> ((10 * acc) +)) 0
+
+unsigned :: Parser Int
+unsigned = decimal <$> many1 (digitToInt <$> digit)
+
+signed :: Parser Int
+signed = do
+    f <- option id (char '-' $> negate <|> char '+' $> id)
+    f . decimal <$> many1 (digitToInt <$> digit)
 
 flatten :: Format -> [Format] -> [Format]
 flatten (Literal x) (Literal y : ys) = flatten (Literal (x ++ y)) ys
@@ -109,7 +125,8 @@ toType :: Format -> TH.TypeQ
 toType = \case
     Empty -> [t|()|]
     Newline -> [t|()|]
-    Decimal -> [t|Int|]
+    Unsigned -> [t|Int|]
+    Signed -> [t|Int|]
     String -> [t|String|]
     Char -> [t|Char|]
     Literal _ -> [t|()|]
@@ -156,38 +173,21 @@ atom =
     choice
         [ try $ Group <$> between (char '(') (char ')') factor1
         , try $ string "%s" $> String
-        , try $ string "%d" $> Decimal
+        , try $ string "%d" $> Signed
         , try $ string "%c" $> Char
         , try $ string "%n" $> Newline
-        , Literal <$> (many1 alphaNum <|> many1 (char ' '))
+        , try $ string "%u" $> Unsigned
+        , try $ Literal <$> (char '\\' *> fmap (:[]) chars)
+        , Literal <$> many1 chars
         ]
+chars :: Parser Char
+chars = noneOf "%()\\*+&"
 
 table :: Table Format
-table = [[postfix "*" Many, postfix "+" Some, binary "&" SepBy AssocLeft]]
-
-postfix :: String -> (a -> a) -> Operator String () Identity a
-postfix name fun = Postfix $ string name $> fun
-
-binary :: (Stream s m Char) => String -> (a -> a -> a) -> Assoc -> Operator s u m a
-binary name fun = Infix (string name $> fun)
-
-{-
--- Pre
-factor1 ::= factor1 '|' factor2
-          | factor2
-
-factor2 ::= <empty>
-          | factor2 factor3
-
-factor3 ::= factor3 '*'
-          | factor3 '+'
-          | factor3 '&' factor3
-          | atom
-
-atom ::= '%s'
-       | '%c'
-       | '%n'
-       | '%d'
-       | <literal>
-       | '(' factor1 ')'
--}
+table =
+    [
+        [ Postfix $ char '*' $> Many
+        , Postfix $ char '+' $> Some
+        , Infix (char '&' $> SepBy) AssocLeft
+        ]
+    ]
