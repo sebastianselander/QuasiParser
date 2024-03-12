@@ -1,21 +1,15 @@
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# OPTIONS_GHC -Wno-missing-fields #-}
 
 module QuasiParser where
 
-import Control.Monad (void, (<=<))
-import Control.Monad.Identity (Identity)
-import Data.Char (digitToInt, isSpace)
+import Control.Monad (forM, void, (<=<))
+import Data.Char (digitToInt, isUpper)
 import Data.Data (Data, Typeable)
 import Data.Functor (($>))
-import Data.List (foldl')
-import Language.Haskell.TH (conE)
-import Language.Haskell.TH qualified as TH
+import Data.List (foldl', stripPrefix)
+import Language.Haskell.TH
 import Language.Haskell.TH.Quote
-import Language.Haskell.TH.Syntax (tupleDataName)
 import Text.Parsec hiding (Empty)
 import Text.Parsec.Expr (
     Assoc (..),
@@ -23,7 +17,10 @@ import Text.Parsec.Expr (
     OperatorTable,
     buildExpressionParser,
  )
-import Debug.Trace (traceShow)
+import Data.Functor.Identity (Identity)
+
+intro :: Q [Dec]
+intro = return []
 
 data Format
     = Empty
@@ -31,44 +28,102 @@ data Format
     | Unsigned
     | Char
     | Newline
+    | Symbol
     | String
+    | Optional !Format
+    | At !String
     | Literal !String
+    | Gather !Format
     | Group !Format
     | Many !Format
     | Some !Format
-    | Option !Format !Format
+    | Alternative !Format !Format
     | SepBy !Format !Format
     | Follows !Format !Format
     deriving (Show, Typeable, Data)
 
-makeParser :: Format -> TH.ExpQ
-makeParser fmt2 = traceShow fmt2 [|parseEither ($(toExpr fmt2) <* eof)|]
+fmt :: QuasiQuoter
+fmt =
+    QuasiQuoter
+        { quoteExp = makeParser <=< parseF
+        , quoteType = toType <=< parseF
+        , quotePat = const $ fail "Patterns not supported"
+        , quoteDec = const $ fail "Decs not supported"
+        }
+  where
+    makeParser p = [|parseErr ($(toParser p) <* eof)|]
 
-toExpr :: Format -> TH.ExpQ
-toExpr = \case
+toType :: Format -> TypeQ
+toType = \case
+    Empty -> [t|()|]
+    Newline -> [t|()|]
+    Unsigned -> [t|Int|]
+    Symbol -> [t|Char|]
+    Signed -> [t|Int|]
+    String -> [t|String|]
+    Char -> [t|Char|]
+    Literal _ -> [t|()|]
+    Optional fmt
+        | interesting fmt -> [t|Maybe $(toType fmt)|]
+        | otherwise -> [t|()|]
+    At ts
+        | isUpper (head ts) -> conT (mkName ts)
+        | otherwise -> fail "toType: can't read type variables"
+    Group fmt -> [t|$(toType fmt)|]
+    Gather fmt -> [t|$(toType fmt)|]
+    Many fmt -> if interesting fmt then [t|[$(toType fmt)]|] else [t|()|]
+    Some fmt -> if interesting fmt then [t|[$(toType fmt)]|] else [t|()|]
+    SepBy fmt _ -> if interesting fmt then [t|[$(toType fmt)]|] else [t|()|]
+    Alternative l r
+        | interesting l, interesting r -> [t|Either $(toType l) $(toType r)|]
+        | interesting l -> [t|Maybe $lt|]
+        | interesting r -> [t|Maybe $rt|]
+        | otherwise -> [t|()|]
+      where
+        lt = toType l
+        rt = toType r
+    Follows l r -> [t|($(toType l), $(toType r))|]
+
+toParser :: Format -> ExpQ
+toParser = \case
     Empty -> [|return ()|]
     Newline -> [|void newline|]
-    String -> [|many1 (satisfy (not . isSpace))|]
+    String -> [|many1 letter|]
+    Symbol -> [|many1 symbol|]
     Unsigned -> [|unsigned|]
     Signed -> [|signed|]
-    Char -> [|many1 alphaNum|]
+    Char -> [|many1 letter|]
+    Optional fmt
+        | interesting fmt -> [|option Nothing (Just <$> $(toParser fmt))|]
+        | otherwise -> [|optional $(toParser fmt)|]
+    Gather fmt -> [|fst <$> gather $(toParser fmt)|]
+    At tag
+        | isUpper (head tag) -> makeEnumParser tag
+        | otherwise -> varE (mkName tag)
     Literal str -> [|void (string str)|]
-    Group fmt -> [|$(toExpr fmt)|]
-    Many f ->
-        if interesting f
-            then [|many $(toExpr f)|]
-            else [|void (many $(toExpr f))|]
-    Some f ->
-        if interesting f
-            then [|many1 $(toExpr f)|]
-            else [|void (many1 $(toExpr f))|]
+    Group fmt -> [|$(toParser fmt)|]
+    Many fmt ->
+        if interesting fmt
+            then [|many $(toParser fmt)|]
+            else [|void (many $(toParser fmt))|]
+    Some fmt ->
+        if interesting fmt
+            then [|many1 $(toParser fmt)|]
+            else [|void (many1 $(toParser fmt))|]
     SepBy l r ->
         if interesting l
-            then [|sepBy $(toExpr l) $(toExpr r)|]
-            else [|void (sepBy $(toExpr l) $(toExpr r))|]
-    Option l r -> [|Left <$> $(toExpr l) <|> Right <$> $(toExpr r)|]
+            then [|sepBy $(toParser l) $(toParser r)|]
+            else [|void (sepBy $(toParser l) $(toParser r))|]
+    Alternative l r
+        | interesting l, interesting r -> [|Left <$> $le <|> Right <$> $re|]
+        | interesting l -> [|Just <$> $le <|> Nothing <$ $re|]
+        | interesting r -> [|Nothing <$ $le <|> Just <$> $re|]
+        | otherwise -> [|$le <|> $re|]
+      where
+        le = toParser l
+        re = toParser r
     fmt@(Follows _ _) -> do
-        let fmts = [(interesting x, toExpr x) | x <- flatten fmt []]
+        let fmts = [(interesting x, toParser x) | x <- flatten fmt []]
             n = foldl' (\acc (x, _) -> if x then acc + 1 else acc) 0 fmts
             tup = conE (tupleDataName n)
         case fmts of
@@ -79,7 +134,7 @@ toExpr = \case
                 | ii -> foldl' apN [|$tup <$> $e|] es
                 | otherwise -> foldl' apN [|$tup <$ $e|] es
       where
-        ap0 l (_, r) = [|$l $> $r|]
+        ap0 l (_, r) = [|$l *> $r|]
         ap1 l (i, r) = if i then [|$l *> $r|] else [|$l <* $r|]
         apN l (i, r) = if i then [|$l <*> $r|] else [|$l <* $r|]
 
@@ -89,15 +144,30 @@ interesting = \case
     Literal{} -> False
     Newline -> False
     Signed -> True
+    Symbol -> True
     Unsigned -> True
     Char -> True
+    At _ -> True
     String -> True
+    Gather _ -> True
+    Optional fmt -> interesting fmt
     Group fmt -> interesting fmt
     Many fmt -> interesting fmt
     Some fmt -> interesting fmt
     SepBy l _ -> interesting l
-    Option l r -> interesting l || interesting r
+    Alternative l r -> interesting l || interesting r
     Follows l r -> interesting l || interesting r
+
+gather :: Parser a -> Parser (String, a)
+gather p = do
+    before <- getInput
+    res <- p
+    afterLen <- length <$> getInput
+    let parStr = take (length before - afterLen) before
+    return (parStr, res)
+
+symbol :: Parser Char
+symbol = oneOf "!@#$%^&*_+=|'\";:"
 
 decimal :: [Int] -> Int
 decimal = foldl' (\acc -> ((10 * acc) +)) 0
@@ -116,35 +186,80 @@ flatten Empty xs = xs
 flatten (Follows l r) xs = flatten l (flatten r xs)
 flatten x ys = x : ys
 
-parseF :: String -> TH.Q Format
+parseF :: String -> Q Format
 parseF s = case parseEither (factor1 <* eof) s of
     Left err -> fail (show err)
     Right r -> return r
 
-toType :: Format -> TH.TypeQ
-toType = \case
-    Empty -> [t|()|]
-    Newline -> [t|()|]
-    Unsigned -> [t|Int|]
-    Signed -> [t|Int|]
-    String -> [t|String|]
-    Char -> [t|Char|]
-    Literal _ -> [t|()|]
-    Group fo -> [t|$(toType fo)|]
-    Many fo -> [t|[$(toType fo)]|]
-    Some fo -> [t|[$(toType fo)]|]
-    SepBy l _ -> [t|$(toType l)|]
-    Option l r -> [t|Either $(toType l) $(toType r)|]
-    Follows l r -> [t|($(toType l), $(toType r))|]
+makeEnumParser :: String -> ExpQ
+makeEnumParser xs = do
+    cases <- go xs
+    let parsers = [[|$(conE name) <$ string str|] | (name, str) <- cases]
+    [|choice $(listE parsers)|]
+  where
+    go :: String -> Q [(Name, String)]
+    go str = do
+        tyInfo <- lookupTypeName str
+        tyName <- maybe (fail "Data type not found") return tyInfo
+        cons <-
+            reify tyName >>= \case
+                TyConI (DataD _ _ _ _ cons _) -> return cons
+                _ -> fail $ "Failed finding data type: " <> str
+        forM cons $ \case
+            NormalC n _
+                | Just name <- stripPrefix str (nameBase n) ->
+                    case name of
+                        '_' : symbolName -> do
+                            sym <- processSymbolName symbolName
+                            return (n, sym)
+                        _ -> return (n, name)
+            _ -> fail "Not an enum constructor"
 
-format :: QuasiQuoter
-format =
-    QuasiQuoter
-        { quoteExp = makeParser <=< parseF
-        , quoteType = toType <=< parseF
-        }
+processSymbolName :: String -> Q String
+processSymbolName str =
+    case break ('_' ==) str of
+        (name, rest) ->
+            case lookup name symbolNames of
+                Nothing -> fail ("Unknown symbol name: " ++ name)
+                Just sym ->
+                    case rest of
+                        [] -> pure [sym]
+                        _ : str' -> (sym :) <$> processSymbolName str'
 
--- Parsing regex
+symbolNames :: [(String, Char)]
+symbolNames =
+    [ ("LT", '<')
+    , ("GT", '>')
+    , ("EQ", '=')
+    , ("BANG", '!')
+    , ("AT", '@')
+    , ("HASH", '#')
+    , ("DOLLAR", '$')
+    , ("PERCENT", '%')
+    , ("CARET", '^')
+    , ("AMPERSAND", '&')
+    , ("STAR", '*')
+    , ("PIPE", '|')
+    , ("LPAREN", '(')
+    , ("RPAREN", ')')
+    , ("LBRACE", '{')
+    , ("RBRACE", '}')
+    , ("LBRACK", '[')
+    , ("RBRACK", ']')
+    , ("COLON", ':')
+    , ("SEMI", ';')
+    , ("QUESTION", '?')
+    , ("SLASH", '/')
+    , ("BACKSLASH", '\\')
+    , ("UNDERSCORE", '_')
+    , ("DASH", '-')
+    , ("DOT", '.')
+    , ("COMMA", ',')
+    , ("PLUS", '+')
+    , ("TILDE", '~')
+    ]
+
+-- Parsing for the Quasi Quoter
 
 type Parser = Parsec String ()
 type Table a = OperatorTable String () Identity a
@@ -152,14 +267,23 @@ type Table a = OperatorTable String () Identity a
 parseEither :: Parser a -> String -> Either ParseError a
 parseEither p = parse (p <* eof) ""
 
+parseErr :: Parser a -> String -> a
+parseErr p s = case parseEither p s of
+    Left err -> error (show err)
+    Right r -> r
+
 factor1 :: Parser Format
 factor1 =
     choice
-        [ try $ factor2 `chainl1` (char '|' $> Option)
+        [ try $ factor2 `chainl1` (char '|' $> Alternative)
         , factor2
         ]
 factor2 :: Parser Format
-factor2 = choice [try $ factor3 `chainl1` (return () $> Follows), factor3]
+factor2 =
+    choice
+        [ try $ factor3 `chainl1` (return () $> Follows)
+        , factor3
+        ]
 
 factor3 :: Parser Format
 factor3 =
@@ -177,16 +301,20 @@ atom =
         , try $ string "%c" $> Char
         , try $ string "%n" $> Newline
         , try $ string "%u" $> Unsigned
-        , try $ Literal <$> (char '\\' *> fmap (:[]) chars)
+        , try $ string "%y" $> Symbol
+        , try $ string "@" *> (At <$> many1 letter)
+        , try $ Literal <$> (char '\\' *> fmap (: []) anyChar)
         , Literal <$> many1 chars
         ]
 chars :: Parser Char
-chars = noneOf "%()\\*+&"
+chars = noneOf "%()\\*+&|@!?"
 
 table :: Table Format
 table =
     [
-        [ Postfix $ char '*' $> Many
+        [ Postfix $ char '!' $> Gather
+        , Postfix $ char '?' $> Optional
+        , Postfix $ char '*' $> Many
         , Postfix $ char '+' $> Some
         , Infix (char '&' $> SepBy) AssocLeft
         ]
