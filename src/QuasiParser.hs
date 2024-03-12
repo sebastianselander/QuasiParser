@@ -63,17 +63,17 @@ toType = \case
     String -> [t|String|]
     Char -> [t|Char|]
     Literal _ -> [t|()|]
-    Optional fmt
-        | interesting fmt -> [t|Maybe $(toType fmt)|]
+    Optional format
+        | interesting format -> [t|Maybe $(toType format)|]
         | otherwise -> [t|()|]
     At ts
         | isUpper (head ts) -> conT (mkName ts)
         | otherwise -> fail "toType: can't read type variables"
-    Group fmt -> [t|$(toType fmt)|]
-    Gather fmt -> [t|$(toType fmt)|]
-    Many fmt -> if interesting fmt then [t|[$(toType fmt)]|] else [t|()|]
-    Some fmt -> if interesting fmt then [t|[$(toType fmt)]|] else [t|()|]
-    SepBy fmt _ -> if interesting fmt then [t|[$(toType fmt)]|] else [t|()|]
+    Group format -> [t|$(toType format)|]
+    Gather format -> [t|$(toType format)|]
+    Many format -> if interesting format then [t|[$(toType format)]|] else [t|()|]
+    Some format -> if interesting format then [t|[$(toType format)]|] else [t|()|]
+    SepBy format _sep -> if interesting format then [t|[$(toType format)]|] else [t|()|]
     Alternative l r
         | interesting l, interesting r -> [t|Either $(toType l) $(toType r)|]
         | interesting l -> [t|Maybe $lt|]
@@ -93,23 +93,23 @@ toParser = \case
     Unsigned -> [|unsigned|]
     Signed -> [|signed|]
     Char -> [|many1 letter|]
-    Optional fmt
-        | interesting fmt -> [|option Nothing (Just <$> $(toParser fmt))|]
-        | otherwise -> [|optional $(toParser fmt)|]
-    Gather fmt -> [|fst <$> gather $(toParser fmt)|]
+    Optional format
+        | interesting format -> [|option Nothing (Just <$> $(toParser format))|]
+        | otherwise -> [|optional $(toParser format)|]
+    Gather format -> [|fst <$> gather $(toParser format)|]
     At tag
         | isUpper (head tag) -> makeEnumParser tag
         | otherwise -> varE (mkName tag)
     Literal str -> [|void (string str)|]
-    Group fmt -> [|$(toParser fmt)|]
-    Many fmt ->
-        if interesting fmt
-            then [|many $(toParser fmt)|]
-            else [|void (many $(toParser fmt))|]
-    Some fmt ->
-        if interesting fmt
-            then [|many1 $(toParser fmt)|]
-            else [|void (many1 $(toParser fmt))|]
+    Group format -> [|$(toParser format)|]
+    Many format ->
+        if interesting format
+            then [|many $(toParser format)|]
+            else [|void (many $(toParser format))|]
+    Some format ->
+        if interesting format
+            then [|many1 $(toParser format)|]
+            else [|void (many1 $(toParser format))|]
     SepBy l r ->
         if interesting l
             then [|sepBy $(toParser l) $(toParser r)|]
@@ -122,8 +122,8 @@ toParser = \case
       where
         le = toParser l
         re = toParser r
-    fmt@(Follows _ _) -> do
-        let fmts = [(interesting x, toParser x) | x <- flatten fmt []]
+    format@(Follows _ _) -> do
+        let fmts = [(interesting x, toParser x) | x <- flatten format []]
             n = foldl' (\acc (x, _) -> if x then acc + 1 else acc) 0 fmts
             tup = conE (tupleDataName n)
         case fmts of
@@ -150,10 +150,10 @@ interesting = \case
     At _ -> True
     String -> True
     Gather _ -> True
-    Optional fmt -> interesting fmt
-    Group fmt -> interesting fmt
-    Many fmt -> interesting fmt
-    Some fmt -> interesting fmt
+    Optional format -> interesting format
+    Group format -> interesting format
+    Many format -> interesting format
+    Some format -> interesting format
     SepBy l _ -> interesting l
     Alternative l r -> interesting l || interesting r
     Follows l r -> interesting l || interesting r
