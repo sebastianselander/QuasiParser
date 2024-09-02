@@ -3,10 +3,12 @@
 
 module QuasiParser where
 
+import Control.Arrow ((>>>))
 import Control.Monad (forM, void, (<=<))
 import Data.Char (digitToInt, isUpper)
 import Data.Data (Data, Typeable)
 import Data.Functor (($>))
+import Data.Functor.Identity (Identity)
 import Data.List (foldl', stripPrefix)
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
@@ -17,7 +19,6 @@ import Text.Parsec.Expr (
     OperatorTable,
     buildExpressionParser,
  )
-import Data.Functor.Identity (Identity)
 
 intro :: Q [Dec]
 intro = return []
@@ -92,7 +93,7 @@ toParser = \case
     Symbol -> [|many1 symbol|]
     Unsigned -> [|unsigned|]
     Signed -> [|signed|]
-    Char -> [|many1 letter|]
+    Char -> [|letter|]
     Optional format
         | interesting format -> [|option Nothing (Just <$> $(toParser format))|]
         | otherwise -> [|optional $(toParser format)|]
@@ -212,7 +213,7 @@ makeEnumParser xs = do
                         '_' : symbolName -> do
                             sym <- processSymbolName symbolName
                             return (n, sym)
-                        _ -> return (n, name)
+                        _ -> fail "Data type constructors must be snake cased"
             _ -> fail "Not an enum constructor"
 
 processSymbolName :: String -> Q String
@@ -220,7 +221,7 @@ processSymbolName str =
     case break ('_' ==) str of
         (name, rest) ->
             case lookup name symbolNames of
-                Nothing -> fail ("Unknown symbol name: " ++ name)
+                Nothing -> pure name
                 Just sym ->
                     case rest of
                         [] -> pure [sym]
@@ -296,6 +297,12 @@ atom :: Parser Format
 atom =
     choice
         [ try $ Group <$> between (char '(') (char ')') factor1
+        , try $
+            foldl1 Alternative
+                <$> between
+                    (char '[')
+                    (char ']')
+                    (many1 (Literal <$> fmap (: []) (chars <|> char '\\' *> anyChar)))
         , try $ string "%s" $> String
         , try $ string "%d" $> Signed
         , try $ string "%c" $> Char
@@ -303,19 +310,27 @@ atom =
         , try $ string "%u" $> Unsigned
         , try $ string "%y" $> Symbol
         , try $ string "@" *> (At <$> many1 letter)
-        , try $ Literal <$> (char '\\' *> fmap (: []) anyChar)
+        , Literal <$> (char '\\' *> fmap (: []) anyChar)
         , Literal <$> many1 chars
         ]
 chars :: Parser Char
-chars = noneOf "%()\\*+&|@!?"
+chars = noneOf "%()\\*+&|@!?[]"
 
 table :: Table Format
 table =
     [
-        [ Postfix $ char '!' $> Gather
-        , Postfix $ char '?' $> Optional
-        , Postfix $ char '*' $> Many
-        , Postfix $ char '+' $> Some
-        , Infix (char '&' $> SepBy) AssocLeft
+        [ Postfix $
+            foldr1 (>>>)
+                <$> many1
+                    ( choice
+                        [ char '!' $> Gather
+                        , char '?' $> Optional
+                        , char '*' $> Many
+                        , char '+' $> Some
+                        ]
+                    )
+        ]
+    ,
+        [ Infix (char '&' $> SepBy) AssocLeft
         ]
     ]

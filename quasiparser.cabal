@@ -1,5 +1,5 @@
 cabal-version:   3.0
-name:            meta-parsing
+name:            quasiparser
 version:         0.1.0.0
 
 -- synopsis:
@@ -14,8 +14,6 @@ category:        Language
 build-type:      Simple
 extra-doc-files: CHANGELOG.md
 
--- extra-source-files:
-
 common warnings
   ghc-options: -Wall -Wextra
 
@@ -23,6 +21,8 @@ library
   import:           warnings
   exposed-modules:
     QuasiParser
+    Example
+    Aoc23.Day1
 
   -- other-modules:
   -- other-extensions:
