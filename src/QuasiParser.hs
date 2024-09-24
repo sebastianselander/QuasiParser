@@ -213,7 +213,8 @@ makeEnumParser xs = do
                         '_' : symbolName -> do
                             sym <- processSymbolName symbolName
                             return (n, sym)
-                        _ -> fail "Data type constructors must be snake cased"
+                        _ -> return (n, name)
+                | otherwise -> return (n, nameBase n)
             _ -> fail "Not an enum constructor"
 
 processSymbolName :: String -> Q String
@@ -221,7 +222,7 @@ processSymbolName str =
     case break ('_' ==) str of
         (name, rest) ->
             case lookup name symbolNames of
-                Nothing -> pure name
+                Nothing -> return name
                 Just sym ->
                     case rest of
                         [] -> pure [sym]

@@ -19,13 +19,8 @@ common warnings
 
 library
   import:           warnings
-  exposed-modules:
-    QuasiParser
-    Example
-    Aoc23.Day1
-
-  -- other-modules:
-  -- other-extensions:
+  exposed-modules:  QuasiParser
+  other-modules:    Example
   build-depends:
     , base
     , parsec
